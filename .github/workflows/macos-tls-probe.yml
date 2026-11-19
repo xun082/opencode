@@ -44,10 +44,23 @@ jobs:
           status=$("$oc" service status)
           "$bun" -e 'const [file, url] = process.argv.slice(-2); const info = await Bun.file(file).json(); if (info.url !== url) throw new Error("Managed service URL mismatch"); console.log("Managed service is registered")' "$XDG_STATE_HOME/opencode/service.json" "$status"
 
-          set +e
-          printf '\nManaged mode\n'
-          gtimeout 55 "$oc" run --model tls-repro/glm-4.7 'Say hello.'
-          printf 'Managed command exit %s\n' "$?"
-          printf '\nStandalone mode\n'
-          gtimeout 55 "$oc" run --standalone --model tls-repro/glm-4.7 'Say hello.'
-          printf 'Standalone command exit %s\n' "$?"
+          python3 - "$oc" <<'PY'
+          import subprocess
+          import sys
+
+          inconclusive = False
+          for label, options in [("Managed", []), ("Standalone", ["--standalone"])]:
+              print(f"\n{label} mode", flush=True)
+              command = [sys.argv[1], "run", *options, "--model", "tls-repro/glm-4.7", "Say hello."]
+              try:
+                  result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=80)
+              except subprocess.TimeoutExpired:
+                  print(f"{label} command timed out")
+                  inconclusive = True
+                  continue
+              print(result.stdout)
+              print(f"{label} command exit {result.returncode}")
+              if "令牌已过期或验证不正确" not in result.stdout and "CERT" not in result.stdout:
+                  inconclusive = True
+          sys.exit(inconclusive)
+          PY
