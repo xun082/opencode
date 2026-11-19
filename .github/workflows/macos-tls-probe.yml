@@ -1,0 +1,53 @@
+name: macOS issuer certificate probe
+
+on:
+  push:
+    branches: [macos-tls-probe]
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: xcode-27
+    timeout-minutes: 8
+    steps:
+      - name: Compare system curl, Bun, and OpenCode v2.3.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          root=$(mktemp -d "$RUNNER_TEMP/opencode-tls.XXXXXXXX")
+          cd "$root"
+          curl -fsSL --retry 2 --max-time 90 -o opencode.zip https://github.com/anomalyco/opencode/releases/download/v2.3.2/opencode-darwin-arm64.zip
+          curl -fsSL --retry 2 --max-time 90 -o bun.zip https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-darwin-aarch64.zip
+          printf '%s\n' '31ab5a06a29edc7e49b895f35c2b64ebfe7c7f0437b0f2581b006efcd79fee1a  opencode.zip' 'c240d7f0ccb90c263a849fcdb09b7ee62630d921348ed6aafda86b9d577bc510  bun.zip' | shasum -a 256 -c -
+          unzip -q opencode.zip -d cli
+          unzip -q bun.zip -d bun
+          oc=$(find "$root/cli" -type f -name opencode -print -quit)
+          bun=$(find "$root/bun" -type f -name bun -print -quit)
+          "$oc" --version
+          "$bun" --version
+
+          unset NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED NODE_USE_SYSTEM_CA SSL_CERT_FILE SSL_CERT_DIR
+          /usr/bin/curl -sS --max-time 25 -o /dev/null -w 'curl HTTP %{http_code}; certificate verify result %{ssl_verify_result}\n' https://open.bigmodel.cn/api/paas/v4/models || true
+          "$bun" --use-system-ca -e 'try { const r = await fetch("https://open.bigmodel.cn/api/paas/v4/models", {signal:AbortSignal.timeout(20000)}); console.log("Bun HTTP", r.status) } catch (e) { console.log("Bun error", e.code, e.message) }'
+
+          export HOME="$root/home" XDG_CONFIG_HOME="$root/config" XDG_DATA_HOME="$root/data" XDG_STATE_HOME="$root/state" XDG_CACHE_HOME="$root/cache" TMPDIR="$root/tmp"
+          export OPENCODE_DISABLE_MODELS_FETCH=true OPENCODE_DISABLE_FILEWATCHER=true
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME/opencode" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$TMPDIR"
+          trap '"$oc" service stop >/dev/null 2>&1 || true' EXIT
+          cat > "$XDG_CONFIG_HOME/opencode/opencode.json" <<'JSON'
+          {"provider":{"tls-repro":{"name":"BigModel TLS check","npm":"@ai-sdk/openai-compatible","options":{"baseURL":"https://open.bigmodel.cn/api/paas/v4","apiKey":"intentionally-invalid-repro-token"},"models":{"glm-4.7":{"name":"GLM 4.7"}}}},"model":"tls-repro/glm-4.7"}
+          JSON
+          "$oc" service start
+          status=$("$oc" service status)
+          "$bun" -e 'const [file, url] = process.argv.slice(-2); const info = await Bun.file(file).json(); if (info.url !== url) throw new Error("Managed service URL mismatch"); console.log("Managed service is registered")' "$XDG_STATE_HOME/opencode/service.json" "$status"
+
+          set +e
+          printf '\nManaged mode\n'
+          gtimeout 55 "$oc" run --model tls-repro/glm-4.7 'Say hello.'
+          printf 'Managed command exit %s\n' "$?"
+          printf '\nStandalone mode\n'
+          gtimeout 55 "$oc" run --standalone --model tls-repro/glm-4.7 'Say hello.'
+          printf 'Standalone command exit %s\n' "$?"
